@@ -1,0 +1,8 @@
+{
+  "name": "Voice AI Assistant",
+  "description": "A real-time conversational voice AI assistant using Pollinations AI.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
