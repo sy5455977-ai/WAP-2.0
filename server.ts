@@ -1,60 +1,14 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
-import TelegramBot from 'node-telegram-bot-api';
+import { setupTelegramBot } from './src/bot/main.js';
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Initialize Telegram Bot if token is available
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (token) {
-    const bot = new TelegramBot(token, { polling: true });
-    console.log('[Telegram] Bot initialized successfully');
-
-    bot.on('message', async (msg) => {
-      const chatId = msg.chat.id;
-      const text = msg.text;
-
-      if (!text) return;
-
-      console.log(`[Telegram] Message received from ${chatId}: ${text}`);
-
-      try {
-        // Show typing status
-        bot.sendChatAction(chatId, 'typing');
-
-        // Call the AI (using the Pollinations API)
-        const response = await fetch('https://text.pollinations.ai/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: [
-              { role: 'system', content: 'You are a helpful and intelligent AI assistant. Keep your responses concise for Telegram.' },
-              { role: 'user', content: text }
-            ],
-            seed: Math.floor(Math.random() * 1000000)
-          }),
-        });
-
-        if (!response.ok) throw new Error('AI API Error');
-        const generatedText = await response.text();
-
-        // Send response back to Telegram
-        bot.sendMessage(chatId, generatedText, { parse_mode: 'Markdown' });
-      } catch (error: any) {
-        console.error('[Telegram] Pollinations Error:', error);
-        bot.sendMessage(chatId, "Bhai, server mein thoda issue aa gaya hai. Please thodi der baad try karo.");
-      }
-    });
-
-    bot.on('polling_error', (error) => {
-      console.error('[Telegram] Polling error:', error.message);
-    });
-  } else {
-    console.log('[Telegram] Skipping bot initialization: TELEGRAM_BOT_TOKEN not set.');
-  }
+  // Initialize modular Telegram Bot
+  setupTelegramBot();
 
   // API routes FIRST
   app.get('/api/health', (req, res) => {

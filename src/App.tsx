@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Mic, MicOff, Moon, Sun, Trash2, StopCircle, Volume2, Send, Plus, MessageSquare, Edit2, Menu, X, Copy, Check, RefreshCw } from 'lucide-react';
+import { Mic, MicOff, Moon, Sun, Trash2, StopCircle, Volume2, Send, Plus, MessageSquare, Edit2, Menu, X, Copy, Check, RefreshCw, Paperclip, FileText, Image as ImageIcon } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import clsx from 'clsx';
@@ -17,6 +17,12 @@ interface Message {
   content: string;
   timestamp: number;
   isTyping?: boolean;
+  file?: {
+    name: string;
+    dataUrl: string;
+    isText: boolean;
+    textContent?: string;
+  };
 }
 
 interface Session {
@@ -28,33 +34,6 @@ interface Session {
 
 const VOICES = ['nova', 'echo', 'onyx', 'alloy'];
 const generateId = () => Math.random().toString(36).substring(2, 10);
-
-// Custom Typewriter Component for Markdown
-const TypewriterMarkdown = ({ content, onComplete, isDark }: { content: string, onComplete: () => void, isDark: boolean }) => {
-  const [displayedContent, setDisplayedContent] = useState('');
-
-  useEffect(() => {
-    let i = 0;
-    const interval = setInterval(() => {
-      const increment = Math.floor(Math.random() * 3) + 1;
-      i += increment;
-      if (i >= content.length) {
-        setDisplayedContent(content);
-        clearInterval(interval);
-        onComplete();
-      } else {
-        setDisplayedContent(content.substring(0, i));
-      }
-    }, 15);
-    return () => clearInterval(interval);
-  }, [content, onComplete]);
-
-  return (
-    <div className={cn("markdown-body", isDark ? "dark-markdown" : "")}>
-      <Markdown remarkPlugins={[remarkGfm]}>{displayedContent}</Markdown>
-    </div>
-  );
-};
 
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>(() => {
@@ -81,6 +60,10 @@ export default function App() {
   const [editTitleBuffer, setEditTitleBuffer] = useState('');
   const [input, setInput] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  
+  // File Upload State
+  const [attachedFile, setAttachedFile] = useState<{name: string, type: string, dataUrl: string, isText: boolean, textContent?: string} | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Voice & AI State
   const [isListening, setIsListening] = useState(false);
@@ -211,9 +194,70 @@ export default function App() {
     }
   };
 
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.type.startsWith('image/')) {
+        const resizeImage = (f: File): Promise<string> => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let w = img.width;
+                        let h = img.height;
+                        const MAX = 800; // Resize to max 800px to ensure extremely fast API processing
+
+                        if (w > h) {
+                            if (w > MAX) { h *= MAX / w; w = MAX; }
+                        } else {
+                            if (h > MAX) { w *= MAX / h; h = MAX; }
+                        }
+
+                        canvas.width = w;
+                        canvas.height = h;
+                        const ctx = canvas.getContext('2d');
+                        if(ctx) {
+                           ctx.fillStyle = 'white';
+                           ctx.fillRect(0,0,w,h);
+                           ctx.drawImage(img, 0, 0, w, h);
+                        }
+                        resolve(canvas.toDataURL('image/jpeg', 0.6)); // 60% quality JPEG is very small
+                    };
+                    img.src = e.target?.result as string;
+                };
+                reader.readAsDataURL(f);
+            });
+        };
+
+        const dataUrl = await resizeImage(file);
+        setAttachedFile({
+            name: file.name,
+            type: file.type,
+            dataUrl: dataUrl,
+            isText: false
+        });
+    } else {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            setAttachedFile({
+                name: file.name,
+                type: file.type,
+                dataUrl: '',
+                isText: true,
+                textContent: e.target?.result as string
+            });
+        };
+        reader.readAsText(file);
+    }
+    e.target.value = ''; // reset
+  };
+
   const handleSendText = () => {
     const text = input.trim();
-    if (!text || isThinking) return;
+    if ((!text && !attachedFile) || isThinking) return;
 
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
@@ -223,16 +267,31 @@ export default function App() {
   // 3-LAYER AI SYSTEM
   const fetchAIResponse = async (contextMessages: Message[]) => {
     const formattedMessages = [
-      { role: 'system', content: 'You are a concise, helpful conversational AI assistant. You process text and return high-quality markdown responses.' },
-      ...contextMessages.slice(-15).map(m => ({
-        role: m.role === 'model' ? 'assistant' : 'user',
-        content: m.content
-      }))
+      { role: 'system', content: 'You are a concise, helpful conversational AI assistant. You process text and return high-quality markdown responses instantly.' },
+      ...contextMessages.slice(-15).map(m => {
+        let content: any = m.content;
+        
+        if (m.role === 'user' && m.file) {
+           if (m.file.isText) {
+               content = `${m.content}\n\n[Attached File: ${m.file.name}]\n${m.file.textContent}`;
+           } else {
+               content = [
+                   { type: 'text', text: m.content || 'Please analyze this image' },
+                   { type: 'image_url', image_url: { url: m.file.dataUrl } }
+               ];
+           }
+        }
+
+        return {
+          role: m.role === 'model' ? 'assistant' : 'user',
+          content: content
+        };
+      })
     ];
 
     try {
-      // Layer 1: Primary AI (Pollinations)
-      const res = await fetch('https://text.pollinations.ai/', {
+      // Layer 1: Primary AI (Pollinations) - using model=openai for extremely fast response
+      const res = await fetch('https://text.pollinations.ai/?model=openai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: formattedMessages, seed: Math.floor(Math.random() * 1000000) }),
@@ -263,6 +322,10 @@ export default function App() {
     transcriptBufferRef.current = '';
     setInterimTranscript('');
     setIsListening(false);
+    
+    // Grab the attached file currently in state and clear it out
+    const fileToSend = attachedFile;
+    setAttachedFile(null);
 
     let activeSessionId = currentSessionId;
     let isNewSession = false;
@@ -273,7 +336,13 @@ export default function App() {
       setCurrentSessionId(activeSessionId);
     }
 
-    const newUserMsg: Message = { id: generateId(), role: 'user', content: text, timestamp: Date.now() };
+    const newUserMsg: Message = { 
+        id: generateId(), 
+        role: 'user', 
+        content: text, 
+        timestamp: Date.now(),
+        file: fileToSend ? { name: fileToSend.name, dataUrl: fileToSend.dataUrl, isText: fileToSend.isText, textContent: fileToSend.textContent } : undefined
+    };
     
     const sessionHistory = activeSessionId && !isNewSession
        ? (sessions.find(s => s.id === activeSessionId)?.messages || [])
@@ -303,13 +372,14 @@ export default function App() {
     if (isImageCommand) {
        const prompt = text.replace(/\/image/ig, '').replace(/create image/ig, '').replace(/generate image/ig, '').replace(/of /ig, '').trim() || 'beautiful digital art';
        const seed = Math.floor(Math.random() * 1000000);
-       const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true&seed=${seed}`;
+       // Use turbo model and 768px for much faster image generation
+       const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true&seed=${seed}&model=turbo&enhance=false&width=768&height=768`;
        responseText = `Here is your image for **"${prompt}"**:\n\n![Generated Image](${imageUrl})`;
     } else {
        responseText = await fetchAIResponse(chatContext);
     }
     
-    const newAiMsg: Message = { id: generateId(), role: 'model', content: responseText, timestamp: Date.now(), isTyping: true };
+    const newAiMsg: Message = { id: generateId(), role: 'model', content: responseText, timestamp: Date.now(), isTyping: false };
     
     setSessions((prev) =>
       prev.map((s) => s.id === activeSessionId ? { ...s, messages: [...s.messages, newAiMsg], updatedAt: Date.now() } : s)
@@ -334,7 +404,7 @@ export default function App() {
      setSessions(prev => prev.map(s => s.id === currentSession.id ? { ...s, messages: contextToUse } : s));
      
      const responseText = await fetchAIResponse(contextToUse);
-     const regeneratedMsg: Message = { id: generateId(), role: 'model', content: responseText, timestamp: Date.now(), isTyping: true };
+     const regeneratedMsg: Message = { id: generateId(), role: 'model', content: responseText, timestamp: Date.now(), isTyping: false };
      
      setSessions((prev) =>
       prev.map((s) => s.id === currentSession.id ? { ...s, messages: [...contextToUse, regeneratedMsg], updatedAt: Date.now() } : s)
@@ -385,6 +455,7 @@ export default function App() {
     setCurrentSessionId(null);
     setIsSidebarOpen(false);
     setInput('');
+    setAttachedFile(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
   };
 
@@ -541,20 +612,23 @@ export default function App() {
                     >
                       {msg.role === 'model' ? (
                         <>
-                          {msg.isTyping && isLast ? (
-                            <TypewriterMarkdown content={msg.content} isDark={isDark} onComplete={() => {
-                               setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                 ...s, messages: s.messages.map(m => m.id === msg.id ? {...m, isTyping: false} : m)
-                               } : s));
-                            }} />
-                          ) : (
                             <div className={cn("markdown-body", isDark ? "dark-markdown" : "")}>
                                <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
                             </div>
-                          )}
                         </>
                       ) : (
-                        <div className="whitespace-pre-wrap">{msg.content}</div>
+                        <div className="whitespace-pre-wrap flex flex-col gap-2">
+                           {msg.file && (
+                               <div className={cn("flex flex-col gap-2 p-2 rounded-xl border max-w-sm", isDark ? "bg-zinc-800/50 border-zinc-700" : "bg-white/50 border-white/20")}>
+                                   {!msg.file.isText && <img src={msg.file.dataUrl} alt="Attached file" className="w-full h-auto rounded-lg max-h-48 object-cover" />}
+                                   <div className="flex items-center gap-2 text-xs opacity-90 truncate font-semibold">
+                                       {msg.file.isText ? <FileText className="w-4 h-4 flex-shrink-0" /> : <ImageIcon className="w-4 h-4 flex-shrink-0" />}
+                                       <span className="truncate">{msg.file.name}</span>
+                                   </div>
+                               </div>
+                           )}
+                           <span>{msg.content}</span>
+                        </div>
                       )}
                     </div>
                     
@@ -614,39 +688,70 @@ export default function App() {
               )}
 
               <div className={cn(
-                "relative flex items-end w-full shadow-lg border rounded-3xl p-1.5 transition-all",
+                "relative flex flex-col w-full shadow-lg border rounded-3xl p-1.5 transition-all",
                 isDark ? "bg-zinc-900/90 backdrop-blur border-zinc-700/50 focus-within:border-indigo-500" : "bg-white backdrop-blur border-zinc-200 focus-within:border-indigo-400"
               )}>
-                <button
-                  onClick={toggleListening}
-                  disabled={isThinking}
-                  className={cn(
-                    "m-1 p-3 rounded-2xl transition-all duration-300 flex-shrink-0",
-                    isListening ? "bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-md shadow-red-500/20" : isDark ? "bg-zinc-800 text-zinc-400 hover:text-zinc-200" : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-                  )}
-                  title={isListening ? "Stop listening" : "Start speaking"}
-                >
-                  {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                </button>
-
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={handleInput}
-                  onKeyDown={handleKeyDown}
-                  placeholder={isListening ? "Listening..." : "Message AI..."}
-                  style={{ minHeight: '44px' }}
-                  className={cn(
-                    "w-full max-h-[200px] bg-transparent outline-none resize-none px-3 py-3.5 text-[15px] custom-scrollbar",
-                    isDark ? "text-zinc-100 placeholder-zinc-500" : "text-zinc-900 placeholder-zinc-400"
-                  )}
-                  rows={1}
-                />
                 
-                <div className="flex flex-col m-1 gap-1">
-                  <button onClick={handleSendText} disabled={!input.trim() || isThinking} className="p-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:bg-zinc-600 rounded-2xl text-white transition-colors flex-shrink-0 shadow-sm">
-                    <Send className="w-5 h-5" />
-                  </button>
+                {attachedFile && (
+                   <div className="px-3 pt-3 pb-1 flex items-center">
+                       <div className={cn("flex items-center gap-2 px-3 py-1.5 rounded-xl border relative pr-8 max-w-sm", isDark ? "bg-zinc-800 border-zinc-700" : "bg-zinc-100 border-zinc-200")}>
+                           {!attachedFile.isText && <div className="w-8 h-8 rounded shrink-0 bg-cover bg-center overflow-hidden" style={{ backgroundImage: `url(${attachedFile.dataUrl})` }} />}
+                           <div className="flex flex-col overflow-hidden">
+                              <span className="text-xs font-semibold truncate">{attachedFile.name}</span>
+                              <span className="text-[10px] opacity-60 uppercase">{attachedFile.type || 'Unknown Type'}</span>
+                           </div>
+                           <button onClick={() => setAttachedFile(null)} className="absolute right-1 hover:bg-zinc-500/20 p-1 rounded-full text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">
+                              <X className="w-3.5 h-3.5" />
+                           </button>
+                       </div>
+                   </div>
+                )}
+
+                <div className="w-full flex items-end">
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className={cn(
+                        "m-1 p-3 rounded-2xl transition-all duration-300 flex-shrink-0 relative",
+                        isDark ? "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800" : "text-zinc-500 hover:bg-zinc-100"
+                      )}
+                      title="Attach File"
+                    >
+                      <Plus className="w-5 h-5" />
+                      <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="image/*, .txt, .md, .csv, .json" />
+                    </button>
+
+                    {/* Left the microphone button if needed, but made it secondary */}
+                    <button
+                      onClick={toggleListening}
+                      disabled={isThinking}
+                      className={cn(
+                        "mb-1 mr-1 p-3 rounded-2xl transition-all duration-300 flex-shrink-0",
+                        isListening ? "bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-md shadow-red-500/20" : isDark ? "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800" : "text-zinc-500 hover:bg-zinc-100"
+                      )}
+                      title={isListening ? "Stop listening" : "Start speaking"}
+                    >
+                      {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                    </button>
+
+                    <textarea
+                      ref={textareaRef}
+                      value={input}
+                      onChange={handleInput}
+                      onKeyDown={handleKeyDown}
+                      placeholder={isListening ? "Listening..." : "Message AI..."}
+                      style={{ minHeight: '44px' }}
+                      className={cn(
+                        "w-full max-h-[200px] bg-transparent outline-none resize-none px-2 py-3.5 text-[15px] custom-scrollbar",
+                        isDark ? "text-zinc-100 placeholder-zinc-500" : "text-zinc-900 placeholder-zinc-400"
+                      )}
+                      rows={1}
+                    />
+                    
+                    <div className="flex flex-col m-1 gap-1">
+                      <button onClick={handleSendText} disabled={(!input.trim() && !attachedFile) || isThinking} className="p-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:bg-indigo-600/50 rounded-2xl text-white transition-colors flex-shrink-0 shadow-sm">
+                        <Send className="w-5 h-5" />
+                      </button>
+                    </div>
                 </div>
               </div>
               <div className="w-full flex justify-between items-center px-4 mt-3">
